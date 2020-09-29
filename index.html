@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <meta name="description" content="LightSensor"/>
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Light Sensor</title>
+	<script src="https://cdn.rawgit.com/mattdiamond/Recorderjs/08e7abd9/dist/recorder.js"></script>
+  <script src="https://code.jquery.com/jquery-3.3.1.min.js"></script>
+    <link rel="stylesheet" type="text/css" href="css/style.css"/>
+</head>
+<body>
+
+  <script type="text/javascript" src="./js/paho-mqtt.js"></script>
+<script type="text/javascript">
+//alert(tf.getBackend());
+//webkitURL is deprecated but nevertheless
+//URL = window.URL || window.webkitURL;
+tizen.power.request('SCREEN', 'SCREEN_NORMAL');
+tizen.power.request('CPU', 'CPU_AWAKE');
+var client = new Paho.MQTT.Client('192.168.1.70', 3000, "watch_" + parseInt(Math.random() * 100, 10));
+client.onMessageArrived = onMessageArrived;
+
+// connect the client
+client.connect({ onSuccess: onConnect });
+
+function onConnect() {
+    // Once a connection has been made, make a subscription and send a message.
+    console.log("onConnect");
+    client.subscribe("watch1/ack");
+    client.subscribe("watch1/start");
+    client.subscribe("watch1/kill");
+    client.subscribe("watch1/c_audiodata");
+    client.subscribe("watch1/listen");
+    var message = new Paho.MQTT.Message("Watch ready!");
+    message.destinationName = "watch1/connect";
+    client.send(message);
+}
+
+var lock = 0, input_word = "unknown", output_word = "unknown";
+var gumStream; 						//stream from getUserMedia()
+var recorder;
+var rec;						//Recorder.js object
+var input; 							//MediaStreamAudioSourceNode we'll be recording
+var init = 0;
+// shim for AudioContext when it's not avb. 
+var AudioContext = window.AudioContext || window.webkitAudioContext;
+var audioContext; //audio context to help us record
+var dataa;
+function startRecording() {
+    //alert("recordButton clicked");
+    var constraints = { audio: true, video: false };
+    navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+        //alert("getUserMedia() success, stream created, initializing Recorder.js ...");
+        audioContext = new AudioContext();
+        gumStream = stream;
+        input = audioContext.createMediaStreamSource(stream);
+        rec = new Recorder(input, { numChannels: 2 });
+        rec.record();
+        //alert("Recording started");
+
+    });
+}
+
+function stopRecording() {
+    //alert("stopButton clicked");
+    rec.stop();
+    gumStream.getAudioTracks()[0].stop();
+    rec.exportWAV(createDownloadLink);
+    rec.clear();
+}
+
+function createDownloadLink(blob) {
+    //alert('In here now');
+    //name of .wav file to use during upload and download (without extendion)
+    var filename = new Date().toISOString();
+
+    var fd = new FormData();
+    fd.append("audio_data", blob, filename);
+    // alert('Just before ajax');
+    var fd = new FormData();
+    fd.append("audio_data", blob, filename);
+    $.ajax({
+        type: 'POST',
+        url: 'http://192.168.1.70:5555/audiodata',
+        data: fd,
+        processData: false,
+        contentType: false
+    });
+    //alert('Sent message to server');
+}
+
+function onMessageArrived(message) {
+    var msg = JSON.parse(message.payloadString);
+
+    if (message.destinationName == 'watch1/start') {
+        if (msg.test_type == 'baseline') {
+            var FREQUENCY = msg.frequency;
+            alert('Baseline Run!');
+            setInterval(function () {
+                tizen.systeminfo.getPropertyValue('BATTERY', function (battery) {
+                    //                        		  console.log(properties);
+                    tizen.systeminfo.getPropertyValue('CPU', function (cpu) {
+                        init = new Date();
+                        time = new Date().getTime();
+                        m_battery = Object.assign(battery);
+                        m_cpu = Object.assign(cpu);
+                        var message = new Paho.MQTT.Message(JSON.stringify({
+                            hrm: 0,
+                            time: time,
+                            battery: battery,
+                            cpuLoad: cpu,
+                            totalMemory: tizen.systeminfo.getTotalMemory(),
+                            av_Mem: tizen.systeminfo.getAvailableMemory()
+                        }));
+                        message.destinationName = "watch1/finaldata";
+                        client.send(message);
+                        console.log('Message sent');
+                    });
+
+                });
+
+            }, FREQUENCY);
+        }
+    } else if (message.destinationName == 'watch1/c_audiodata') {
+        //alert('Received a message');
+        //alert(message);
+        var msg = JSON.parse(message.payloadString);
+        output_word = msg.word;
+        tizen.systeminfo.getPropertyValue('BATTERY', function (battery) {
+            tizen.systeminfo.getPropertyValue('CPU', function (cpu) {
+                var message2 = new Paho.MQTT.Message(JSON.stringify({
+                    input_word: input_word,
+                    output_word: output_word,
+                    predic_time: new Date() - init,
+                    battery: battery,
+                    cpuLoad: cpu,
+                    totalMemory: tizen.systeminfo.getTotalMemory(),
+                    av_Mem: tizen.systeminfo.getAvailableMemory()
+                }));
+                message2.destinationName = "watch1/audiodata";
+                client.send(message2);
+
+                //alert('Message sent');
+            });
+
+        });
+    } else if (message.destinationName == 'watch1/listen' && lock == 0) {
+        lock = 1;
+        //alert('Received to start');
+        var msg = JSON.parse(message.payloadString);
+        input_word = msg.word;
+        init = new Date();
+        var calc = new Date();
+        startRecording();
+        //alert(new Date() - calc);
+        var audiocapture = new Date() - calc;
+        var message = new Paho.MQTT.Message("Recorder ready! Audio capture:" + audiocapture);
+        message.destinationName = "watch1/readytolisten";
+
+        client.send(message);
+        setTimeout(function () {
+            stopRecording();
+            lock = 0;
+        }, 5000);
+    } else if (message.destinationName == "watch1/kill") {
+        //lightSensor.unsetChangeListener();
+        tizen.application.getCurrentApplication().exit();
+    }
+}
+</script>
+<div class="ui-page ui-page-active" id="main">
+        <div class="ui-header">
+            <h2 class="ui-title">Heart Rate Monitor</h2>
+            <audio id="audio" ></audio>
+        </div>
+        <div class="ui-content">
+        	<div id="controls">
+    <button id="recordButton">Record</button>
+    <button id="pauseButton" disabled>Pause</button>
+    <button id="stopButton" disabled>Stop</button>
+</div>
+        </div>
+ </div>
+
+<h3>Recordings</h3>
+<ol id="recordingsList"></ol>
+    <!--  <canvas id="app-canvas"></canvas>
+    <div class="counter-wrapper">
+        light strength
+        <div id="counter"></div>
+    </div>
+        <script src="js/app.helpers.js"></script>
+    <script src="js/app.model.js"></script>
+    <script src="js/app.ui.js"></script>
+    <script src="js/app.js"></script>
+    -->    
+
+</body>
+</html>
